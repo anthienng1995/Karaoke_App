@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <title>Karaoke TV</title>
+  <link rel="icon" href="/favicon.ico">
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: black;
+      color: white;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+
+    /* Container full màn hình */
+    #video-container {
+      position: fixed;
+      inset: 0;
+      background: black;
+    }
+
+    /* YouTube iframe full màn hình */
+    #player iframe {
+      width: 100vw !important;
+      height: 100vh !important;
+    }
+
+    /* Info bài hát */
+    #info {
+      position: fixed;
+      top: 14px;
+      left: 14px;
+      z-index: 9999;
+      background: rgba(0,0,0,0.55);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+
+    /* ===== QR OVERLAY ===== */
+    #qr-overlay {
+      position: fixed;
+      bottom: 80px;
+      right: 18px;
+      z-index: 9999;
+
+      background: rgba(0, 0, 0, 0.45);
+      padding: 6px;
+      border-radius: 8px;
+      text-align: center;
+    }
+
+    #qr-overlay img {
+      width: 96px;
+      height: 96px;
+    }
+
+    #qr-overlay .qr-text {
+      font-size: 11px;
+      opacity: 0.85;
+      margin-bottom: 2px;
+    }
+
+    #qr-overlay .room-text {
+      font-size: 10px;
+      opacity: 0.7;
+    }
+
+    /* ===== QUEUE BOX ===== */
+    #queue-box {
+    position: fixed;
+    top: 60px;
+    left: 14px;
+    z-index: 9999;
+
+    background: rgba(0,0,0,0.55);
+    padding: 8px 10px;
+    border-radius: 8px;
+    width: 260px;
+    font-size: 13px;
+    }
+
+    .queue-title {
+    font-weight: bold;
+    margin-bottom: 6px;
+    }
+
+    #queue-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    }
+
+    #queue-list li {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0.85;
+    margin-bottom: 3px;
+    }
+    
+  </style>
+</head>
+
+<body>
+  <div id="video-container">
+    <!-- Player -->
+    <div id="player"></div>
+
+    <!-- Info bài hát -->
+    <div id="info">🎤 Đang chờ bài hát...</div>
+
+    <!-- Danh sách bài tiếp theo -->
+    <div id="queue-box">
+    <div class="queue-title">🎶 Bài tiếp theo</div>
+    <ul id="queue-list"></ul>
+    </div>
+
+    <!-- QR nổi -->
+    <div id="qr-overlay">
+      <div class="qr-text">📱 Đặt bài</div>
+      <img id="qr" />
+      <div class="room-text">Room: <b id="room"></b></div>
+    </div>
+  </div>
+
+  <!-- YouTube API -->
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  
+
+  <script>
+    let room = new URLSearchParams(window.location.search).get("room");
+    let player = null;
+    let playing = false;
+    let socket = null;
+    let pollingIntervals = [];
+    let fetchingNext = false;
+
+    // ===== Polling control =====
+    function stopAllPolling() {
+      pollingIntervals.forEach(id => clearInterval(id));
+      pollingIntervals = [];
+    }
+
+    function startFallbackPolling() {
+      console.log('📡 TV: Starting fallback polling (socket disconnected)');
+      stopAllPolling();
+      pollingIntervals.push(setInterval(checkAndPlay, 5000));
+      pollingIntervals.push(setInterval(updateQueue, 5000));
+    }
+
+    // 🔥 Nếu chưa có room → tạo room mới
+    async function ensureRoom() {
+      if (room) {
+        connectSocket();
+        updateQR();
+        return;
+      }
+
+      const res = await fetch("/room/create", { method: "POST" });
+      const data = await res.json();
+      room = data.room_id;
+
+      // update URL (không reload)
+      history.replaceState(null, "", `?room=${room}`);
+      connectSocket();
+      updateQR();
+    }
+
+    function connectSocket() {
+      socket = io();
+
+      socket.on('connect', () => {
+        console.log('✓ TV Socket connected - stopping polling');
+        stopAllPolling();
+        socket.emit('join_room', { room_id: room });
+      });
+
+      socket.on('current_song', (song) => {
+        if (!song || !song.title) {
+          playing = false;
+          document.getElementById("info").innerText = "🎤 Đang chờ bài hát...";
+        } else {
+          playing = false;
+          checkAndPlay();
+        }
+      });
+
+      socket.on('queue_update', (list) => {
+        renderQueue(list);
+      });
+
+      socket.on('song_finished', () => {
+        console.log('📻 TV: Song finished event received');
+        playing = false;
+        checkAndPlay();
+      });
+
+      socket.on('song_skipped', () => {
+        console.log('⏭️ TV: Song skipped event received');
+        playing = false;
+        checkAndPlay();
+      });
+
+      socket.on('disconnect', () => {
+        console.log('✗ TV Socket disconnected - starting fallback polling');
+        startFallbackPolling();
+      });
+    }
+
+    function onYouTubeIframeAPIReady() {
+      ensureRoom().then(() => {
+        // Initial fallback polling (in case socket takes time to connect)
+        setTimeout(() => {
+          if ((!socket || !socket.connected) && pollingIntervals.length === 0) {
+            startFallbackPolling();
+          }
+        }, 2000);
+      });
+    }
+
+    async function checkAndPlay() {
+      if (!room) return;
+
+      // Only fetch if not currently playing (avoid excessive polling when playing)
+      if (playing) return;
+
+      try {
+        const res = await fetch(`/room/${room}/next`, { method: "POST" });
+        const song = await res.json();
+        if (!song) return;
+
+        //playing = true;
+        document.getElementById("info").innerText = "🎵 " + song.title;
+
+        if (player) {
+          player.loadVideoById(song.video_id);
+          return;
+        }
+
+        player = new YT.Player("player", {
+          videoId: song.video_id,
+          playerVars: {
+            autoplay: 1,
+            controls: 1,
+            modestbranding: 1,
+            rel: 0,
+            fs: 1,
+            mute: 1
+          },
+          events: {
+            onReady: e => {
+              const iframe = e.target.getIframe();
+              iframe.style.position = "fixed";
+              iframe.style.inset = "0";
+              iframe.style.width = "100vw";
+              iframe.style.height = "100vh";
+
+              e.target.playVideo();
+              setTimeout(() => e.target.unMute(), 800);
+            },
+            onStateChange: e => {
+              if (e.data === YT.PlayerState.PLAYING) {
+                playing = true;
+              }
+
+              if (e.data === YT.PlayerState.ENDED) {
+                fetch(`/room/${room}/finish`, { method: "POST" });
+                playing = false;
+              }
+            }
+          }
+        });
+      } catch (e) {
+        console.error(e);
+      } finally {
+        fetchingNext = false;
+      }
+    }
+    // 🔳 QR code – dùng IP thật của TV
+    async function updateQR() {
+      const res = await fetch("/server_ip");
+      const data = await res.json();
+
+      const joinUrl =
+        `http://karaoke.cuamoinha.com/phone.html?room=${room}`;
+
+      document.getElementById("room").innerText = room;
+      document.getElementById("qr").src =
+        `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(joinUrl)}`;
+    }
+
+    function renderQueue(list) {
+      const ul = document.getElementById("queue-list");
+      ul.innerHTML = "";
+
+      if (!list || list.length === 0) {
+        ul.innerHTML = "<li>(Chưa có bài)</li>";
+        return;
+      }
+
+      list.forEach((song, i) => {
+        const li = document.createElement("li");
+        li.innerText = `${i + 1}. ${song.title}`;
+        ul.appendChild(li);
+      });
+    }
+
+    function updateQueue() {
+      if (!room) return;
+
+      fetch(`/room/${room}/queue`)
+        .then(res => res.json())
+        .then(list => renderQueue(list))
+        .catch(e => console.error('Error updating queue:', e));
+    }
+  </script>
+</body>
+</html>
