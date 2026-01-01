@@ -123,6 +123,8 @@
     /* ===== SEARCH ===== */
     .search-container {
       margin-bottom: 24px;
+      position: relative;
+      z-index: 10;
     }
 
     input[type="text"] {
@@ -136,6 +138,57 @@
       margin-top: 0 !important;
       transition: all 0.3s ease;
       font-family: inherit;
+    }
+
+    /* ===== AUTOCOMPLETE SUGGESTIONS ===== */
+    .suggestions-dropdown {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      margin-top: 8px;
+      background: rgba(15, 12, 41, 0.98);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 12px;
+      max-height: 300px;
+      overflow-y: auto;
+      z-index: 9999;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+      display: none;
+      min-width: 100%;
+      width: 100%;
+    }
+
+    .suggestions-dropdown.show {
+      display: block;
+      animation: slideDown 0.2s ease-out;
+    }
+
+    .suggestion-item {
+      padding: 12px 16px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .suggestion-item:last-child {
+      border-bottom: none;
+    }
+
+    .suggestion-item:hover {
+      background: rgba(29, 185, 84, 0.15);
+      padding-left: 20px;
+    }
+
+    .suggestion-item::before {
+      content: '🔍';
+      opacity: 0.6;
+      font-size: 12px;
     }
 
     input[type="text"]::placeholder {
@@ -172,6 +225,8 @@
     /* ===== RESULTS ===== */
     #results {
       margin-bottom: 24px;
+      position: relative;
+      z-index: 1;
     }
 
     .song {
@@ -379,7 +434,10 @@
     </label>
   </div>
 
-  <input id="search" type="text" placeholder="Nhập tên bài, ca sĩ...">
+  <div style="position: relative;">
+    <input id="search" type="text" placeholder="Nhập tên bài, ca sĩ...">
+    <div id="suggestions" class="suggestions-dropdown"></div>
+  </div>
   <button onclick="searchSong()" class="search-btn">Tìm kiếm</button>
 </div>
 
@@ -399,6 +457,11 @@ const results = document.getElementById("results");
 const queue = document.getElementById("queue");
 const searchInput = document.getElementById("search");
 const karaokeCheckbox = document.getElementById("karaoke-mode");
+const suggestionsDropdown = document.getElementById("suggestions");
+
+// ===== Autocomplete Debounce =====
+let suggestDebounceTimer = null;
+const SUGGEST_DEBOUNCE_MS = 400; // 400ms debounce for suggestions
 
 // ===== WebSocket Connection =====
 const socket = io();
@@ -599,9 +662,174 @@ function removeSong(index) {
   });
 }
 
+/* ===== AUTOCOMPLETE SUGGESTIONS ===== */
+async function fetchSuggestions(query) {
+  if (query.length < 2) {
+    suggestionsDropdown.classList.remove('show');
+    suggestionsDropdown.innerHTML = '';
+    return;
+  }
+
+  try {
+    // Show loading state
+    suggestionsDropdown.innerHTML = '<div class="suggestion-item" style="opacity: 0.6; cursor: default;">🔍 Đang tìm...</div>';
+    suggestionsDropdown.classList.add('show');
+    
+    console.log('Fetching suggestions for:', query); // Debug log
+    
+    const response = await fetch(`/suggest?q=${encodeURIComponent(query)}`, {
+      headers: {
+        'Accept': 'application/json',
+        'Accept-Charset': 'utf-8'
+      }
+    });
+    
+    console.log('Response status:', response.status); // Debug log
+    
+    if (!response.ok) {
+      if (response.status === 429) {
+        console.warn('Rate limit exceeded for suggestions');
+        suggestionsDropdown.innerHTML = '<div class="suggestion-item" style="opacity: 0.6; cursor: default;">⚠️ Quá nhiều yêu cầu, vui lòng chờ...</div>';
+      } else {
+        console.error('Response not OK:', response.status, response.statusText);
+        suggestionsDropdown.classList.remove('show');
+        suggestionsDropdown.innerHTML = '';
+      }
+      return;
+    }
+
+    // Ensure response is treated as UTF-8
+    const text = await response.text();
+    console.log('Response text:', text.substring(0, 100)); // Debug log
+    
+    let suggestions;
+    try {
+      suggestions = JSON.parse(text);
+      console.log('Parsed suggestions:', suggestions); // Debug log
+    } catch (e) {
+      console.error('Failed to parse suggestions JSON:', e, 'Text:', text);
+      suggestionsDropdown.classList.remove('show');
+      suggestionsDropdown.innerHTML = '';
+      return;
+    }
+    
+    displaySuggestions(suggestions);
+  } catch (err) {
+    console.error('Suggestions error:', err);
+    suggestionsDropdown.classList.remove('show');
+    suggestionsDropdown.innerHTML = '';
+  }
+}
+
+function displaySuggestions(suggestions) {
+  console.log('Displaying suggestions:', suggestions); // Debug log
+  
+  if (!suggestions || !Array.isArray(suggestions) || suggestions.length === 0) {
+    console.log('No suggestions to display');
+    suggestionsDropdown.classList.remove('show');
+    suggestionsDropdown.innerHTML = '';
+    return;
+  }
+
+  suggestionsDropdown.innerHTML = '';
+  
+  // Display up to 8 suggestions
+  suggestions.slice(0, 8).forEach(suggestion => {
+    // Ensure suggestion is a string
+    const suggestionText = String(suggestion || '').trim();
+    if (!suggestionText) return;
+    
+    const item = document.createElement('div');
+    item.className = 'suggestion-item';
+    // Use textContent for safe Unicode handling
+    item.textContent = suggestionText;
+    item.onclick = (e) => {
+      e.stopPropagation(); // Prevent event bubbling
+      searchInput.value = suggestionText;
+      suggestionsDropdown.classList.remove('show');
+      suggestionsDropdown.innerHTML = '';
+      searchSong(); // Auto-search when suggestion is clicked
+    };
+    suggestionsDropdown.appendChild(item);
+  });
+
+  if (suggestionsDropdown.children.length > 0) {
+    console.log('Showing dropdown with', suggestionsDropdown.children.length, 'items');
+    suggestionsDropdown.classList.add('show');
+    // Force reflow to ensure display
+    suggestionsDropdown.offsetHeight;
+  } else {
+    console.log('No items to show, hiding dropdown');
+    suggestionsDropdown.classList.remove('show');
+  }
+}
+
+function hideSuggestions() {
+  // Delay to allow click events on suggestions
+  setTimeout(() => {
+    suggestionsDropdown.classList.remove('show');
+  }, 200);
+}
+
+// ===== INPUT HANDLERS =====
+searchInput.addEventListener('input', (e) => {
+  const query = e.target.value.trim();
+  
+  // Clear previous debounce timer
+  if (suggestDebounceTimer) {
+    clearTimeout(suggestDebounceTimer);
+  }
+
+  // Hide suggestions if input is cleared
+  if (query.length < 2) {
+    suggestionsDropdown.classList.remove('show');
+    suggestionsDropdown.innerHTML = '';
+    return;
+  }
+
+  // Debounce suggestion requests
+  suggestDebounceTimer = setTimeout(() => {
+    fetchSuggestions(query);
+  }, SUGGEST_DEBOUNCE_MS);
+});
+
+// Also listen for focus to show suggestions if query exists
+searchInput.addEventListener('focus', (e) => {
+  const query = e.target.value.trim();
+  if (query.length >= 2) {
+    fetchSuggestions(query);
+  }
+});
+
+// Hide suggestions when clicking outside or pressing Escape
+document.addEventListener('click', (e) => {
+  const target = e.target;
+  // Don't hide if clicking inside search container
+  const searchContainer = searchInput.closest('.search-container');
+  if (searchContainer && searchContainer.contains(target)) {
+    // If clicking on a suggestion item, let its onclick handle it
+    if (target.classList.contains('suggestion-item') || target.closest('.suggestion-item')) {
+      return;
+    }
+    // If clicking on input, keep suggestions visible (they'll update via input event)
+    if (target === searchInput) {
+      return;
+    }
+  }
+  // Hide if clicking outside
+  hideSuggestions();
+});
+
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    hideSuggestions();
+  }
+});
+
 /* ===== SEARCH ENTER KEY ===== */
 searchInput.addEventListener('keypress', (e) => {
   if (e.key === 'Enter') {
+    hideSuggestions();
     searchSong();
   }
 });
@@ -609,3 +837,4 @@ searchInput.addEventListener('keypress', (e) => {
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 </body>
 </html>
+
