@@ -35,9 +35,22 @@
       left: 14px;
       z-index: 9999;
       background: rgba(0,0,0,0.55);
-      padding: 6px 10px;
+      padding: 8px 12px;
       border-radius: 6px;
       font-size: 14px;
+      line-height: 1.4;
+      min-width: 200px;
+    }
+
+    #info .song-title {
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    #info .song-user {
+      font-size: 12px;
+      opacity: 0.85;
+      margin-top: 4px;
     }
 
     /* ===== QR OVERLAY ===== */
@@ -99,7 +112,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
     opacity: 0.85;
-    margin-bottom: 3px;
+    margin-bottom: 4px;
+    font-size: 12px;
+    line-height: 1.4;
+    }
+
+    #queue-list li .song-title {
+    font-weight: 500;
+    }
+
+    #queue-list li .song-user {
+    font-size: 11px;
+    opacity: 0.7;
+    margin-top: 2px;
     }
     
   </style>
@@ -139,6 +164,8 @@
     let socket = null;
     let pollingIntervals = [];
     let fetchingNext = false;
+    let pendingSong = null; // Store song waiting for YouTube API to be ready
+    let youtubeAPIReady = false;
 
     // ===== Polling control =====
     function stopAllPolling() {
@@ -181,17 +208,27 @@
       });
 
       socket.on('current_song', (song) => {
+        updateCurrentSongDisplay(song);
         if (!song || !song.title) {
           playing = false;
-          document.getElementById("info").innerText = "🎤 Đang chờ bài hát...";
+          // Stop video if player exists
+          if (player && player.stopVideo) {
+            player.stopVideo();
+          }
         } else {
           playing = false;
-          checkAndPlay();
+          // Play the song directly from the event data
+          playSongDirectly(song);
         }
       });
 
       socket.on('queue_update', (list) => {
         renderQueue(list);
+      });
+
+      socket.on('username_updated', (data) => {
+        // Update queue display if username changed
+        updateQueue();
       });
 
       socket.on('song_finished', () => {
@@ -213,13 +250,213 @@
     }
 
     function onYouTubeIframeAPIReady() {
+      youtubeAPIReady = true;
+      console.log('✓ YouTube API ready');
+      
       ensureRoom().then(() => {
+        // Play pending song if exists
+        if (pendingSong) {
+          console.log('Playing pending song:', pendingSong);
+          playSongDirectly(pendingSong);
+          pendingSong = null;
+        }
+        
         // Initial fallback polling (in case socket takes time to connect)
         setTimeout(() => {
           if ((!socket || !socket.connected) && pollingIntervals.length === 0) {
             startFallbackPolling();
           }
         }, 2000);
+      });
+    }
+
+    // Function to play song directly from song object
+    function playSongDirectly(song) {
+      if (!song || !song.video_id) {
+        console.log('Invalid song object:', song);
+        return;
+      }
+      
+      updateCurrentSongDisplay(song);
+      
+      if (player) {
+        // Player already exists, just load and play
+        console.log('Player exists, loading video:', song.video_id);
+        player.loadVideoById(song.video_id);
+        // Auto-play will be triggered by onStateChange when state becomes CUED
+        // Also try to play immediately in case CUED doesn't fire
+        setTimeout(() => {
+          try {
+            if (player && player.getPlayerState() === YT.PlayerState.CUED) {
+              player.playVideo();
+              console.log('Forced playVideo() after loadVideoById');
+              // Unmute after playing starts
+              setTimeout(() => {
+                if (player && player.getPlayerState() === YT.PlayerState.PLAYING) {
+                  player.unMute();
+                  console.log('Unmuted after forced playVideo');
+                }
+              }, 500);
+            }
+          } catch (err) {
+            console.error('Error forcing play after loadVideoById:', err);
+          }
+        }, 500);
+        return;
+      }
+      
+      // Check if YouTube API is ready
+      if (!youtubeAPIReady || typeof YT === 'undefined' || !YT.Player) {
+        console.log('YouTube API not ready yet, storing song as pending:', song);
+        pendingSong = song;
+        // Retry when API becomes ready (handled in onYouTubeIframeAPIReady)
+        return;
+      }
+      
+      // Create new player for first song
+      console.log('Creating new YouTube player for video:', song.video_id);
+      player = new YT.Player("player", {
+        videoId: song.video_id,
+        playerVars: {
+          autoplay: 1,  // Try to autoplay
+          controls: 1,
+          modestbranding: 1,
+          rel: 0,
+          fs: 1,
+          mute: 1,  // Start muted to allow autoplay (browser policy), will unmute after playing starts
+          playsinline: 1  // For iOS compatibility
+        },
+        events: {
+          onReady: e => {
+            console.log('YouTube player ready, starting video');
+            const iframe = e.target.getIframe();
+            iframe.style.position = "fixed";
+            iframe.style.inset = "0";
+            iframe.style.width = "100vw";
+            iframe.style.height = "100vh";
+
+            // Retry function to ensure video plays
+            const tryPlay = (attempt = 0) => {
+              try {
+                const state = e.target.getPlayerState();
+                console.log(`Attempt ${attempt + 1}: Player state =`, state);
+                
+                if (state === YT.PlayerState.PLAYING) {
+                  console.log('Video is already playing');
+                  return;
+                }
+                
+                e.target.playVideo();
+                console.log('playVideo() called');
+                
+                // Verify it actually started playing and unmute
+                setTimeout(() => {
+                  const newState = e.target.getPlayerState();
+                  console.log('After playVideo, state =', newState);
+                  
+                  if (newState === YT.PlayerState.PLAYING) {
+                    console.log('Video started playing successfully');
+                    // Unmute after video is playing
+                    try {
+                      e.target.unMute();
+                      console.log('Video unmuted after playing started');
+                    } catch (err) {
+                      console.error('Error unmuting:', err);
+                    }
+                  } else if (newState !== YT.PlayerState.PLAYING && attempt < 3) {
+                    console.log('Retrying play...');
+                    tryPlay(attempt + 1);
+                  }
+                }, 1000);
+              } catch (err) {
+                console.error('Error calling playVideo():', err);
+                if (attempt < 3) {
+                  setTimeout(() => tryPlay(attempt + 1), 500);
+                }
+              }
+            };
+            
+            // Start playing
+            tryPlay();
+          },
+          onStateChange: e => {
+            const state = e.data;
+            console.log('Player state changed to:', state, YT.PlayerState[state]);
+            
+            if (state === YT.PlayerState.PLAYING) {
+              playing = true;
+              console.log('✓ Video is now playing');
+              // Unmute when video starts playing (started muted for autoplay policy)
+              setTimeout(() => {
+                try {
+                  e.target.unMute();
+                  console.log('Video unmuted on PLAYING state');
+                } catch (err) {
+                  console.error('Error unmuting on PLAYING:', err);
+                }
+              }, 300);
+            }
+            
+            // Auto-play when video is cued (loaded and ready)
+            if (state === YT.PlayerState.CUED) {
+              console.log('Video cued, attempting to play');
+              const playWithRetry = (attempt = 0) => {
+                setTimeout(() => {
+                  try {
+                    if (e.target && e.target.playVideo) {
+                      e.target.playVideo();
+                      console.log(`playVideo() called from CUED state (attempt ${attempt + 1})`);
+                      
+                      // Verify it started playing and unmute
+                      setTimeout(() => {
+                        const currentState = e.target.getPlayerState();
+                        console.log('State after CUED playVideo:', currentState);
+                        if (currentState === YT.PlayerState.PLAYING) {
+                          // Unmute after video is playing
+                          try {
+                            e.target.unMute();
+                            console.log('Video unmuted after CUED playVideo');
+                          } catch (err) {
+                            console.error('Error unmuting:', err);
+                          }
+                        } else if (currentState !== YT.PlayerState.PLAYING && 
+                            currentState !== YT.PlayerState.BUFFERING && 
+                            attempt < 5) {
+                          console.warn('Video did not start, retrying...');
+                          playWithRetry(attempt + 1);
+                        }
+                      }, 800);
+                    }
+                  } catch (err) {
+                    console.error('Error playing from CUED state:', err);
+                    if (attempt < 5) {
+                      playWithRetry(attempt + 1);
+                    }
+                  }
+                }, attempt === 0 ? 500 : 1000);
+              };
+              playWithRetry();
+            }
+            
+            // Handle PAUSED state - if video gets paused unexpectedly, try to play
+            if (state === YT.PlayerState.PAUSED && !playing) {
+              console.log('Video paused unexpectedly, attempting to resume');
+              setTimeout(() => {
+                try {
+                  e.target.playVideo();
+                  console.log('Resumed paused video');
+                } catch (err) {
+                  console.error('Error resuming paused video:', err);
+                }
+              }, 500);
+            }
+
+            if (state === YT.PlayerState.ENDED) {
+              fetch(`/room/${room}/finish`, { method: "POST" });
+              playing = false;
+            }
+          }
+        }
       });
     }
 
@@ -234,47 +471,8 @@
         const song = await res.json();
         if (!song) return;
 
-        //playing = true;
-        document.getElementById("info").innerText = "🎵 " + song.title;
-
-        if (player) {
-          player.loadVideoById(song.video_id);
-          return;
-        }
-
-        player = new YT.Player("player", {
-          videoId: song.video_id,
-          playerVars: {
-            autoplay: 1,
-            controls: 1,
-            modestbranding: 1,
-            rel: 0,
-            fs: 1,
-            mute: 1
-          },
-          events: {
-            onReady: e => {
-              const iframe = e.target.getIframe();
-              iframe.style.position = "fixed";
-              iframe.style.inset = "0";
-              iframe.style.width = "100vw";
-              iframe.style.height = "100vh";
-
-              e.target.playVideo();
-              setTimeout(() => e.target.unMute(), 800);
-            },
-            onStateChange: e => {
-              if (e.data === YT.PlayerState.PLAYING) {
-                playing = true;
-              }
-
-              if (e.data === YT.PlayerState.ENDED) {
-                fetch(`/room/${room}/finish`, { method: "POST" });
-                playing = false;
-              }
-            }
-          }
-        });
+        // Use playSongDirectly to avoid code duplication
+        playSongDirectly(song);
       } catch (e) {
         console.error(e);
       } finally {
@@ -294,6 +492,21 @@
         `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(joinUrl)}`;
     }
 
+    function updateCurrentSongDisplay(song) {
+      const infoEl = document.getElementById("info");
+      
+      if (!song || !song.title) {
+        infoEl.innerHTML = "🎤 Đang chờ bài hát...";
+        return;
+      }
+
+      const username = song.added_by_username || "Unknown";
+      infoEl.innerHTML = `
+        <div class="song-title">🎵 ${escapeHtml(song.title)}</div>
+        <div class="song-user">🎤 Người chọn: ${escapeHtml(username)}</div>
+      `;
+    }
+
     function renderQueue(list) {
       const ul = document.getElementById("queue-list");
       ul.innerHTML = "";
@@ -305,9 +518,20 @@
 
       list.forEach((song, i) => {
         const li = document.createElement("li");
-        li.innerText = `${i + 1}. ${song.title}`;
+        const username = song.added_by_username || "Unknown";
+        
+        li.innerHTML = `
+          <div class="song-title">${i + 1}. ${escapeHtml(song.title)}</div>
+          <div class="song-user">⏭️ Tiếp theo: ${escapeHtml(username)}</div>
+        `;
         ul.appendChild(li);
       });
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
     }
 
     function updateQueue() {

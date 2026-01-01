@@ -9,6 +9,7 @@ import re
 import socketio
 import asyncio
 import time
+import random
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from socketio import ASGIApp
@@ -24,12 +25,140 @@ sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 # ===== In-memory rooms =====
 rooms = {}
 # rooms[room_id] = {
-#   "queue": [ {video_id, title} ],
-#   "current": None
+#   "queue": [ {video_id, title, added_by_user_id, added_by_username} ],
+#   "current": {video_id, title, added_by_user_id, added_by_username} or None
 # }
 
 # ===== WebSocket client tracking =====
 room_clients = {}  # room_id -> set of sid
+sid_to_user_id = {}  # sid -> user_id
+
+# ===== User Manager =====
+class UserManager:
+    """Manages temporary user identities (in-memory only)."""
+    
+    def __init__(self):
+        self.users: Dict[str, Dict] = {}  # user_id -> {username, room_id}
+        self.room_usernames: Dict[str, set] = {}  # room_id -> set of usernames (for uniqueness)
+    
+    def generate_random_username(self, room_id: str) -> str:
+        """Generate unique username: [Adjective][Noun]#[Number]"""
+        adjectives = ["Happy", "Cool", "Luna", "Swift", "Bright", "Brave", "Calm", "Epic", 
+                     "Magic", "Noble", "Wild", "Smart", "Bold", "Zen", "Jazzy", "Rocky",
+                     "Smooth", "Crazy", "Sweet", "Chill", "Super", "Mega", "Tiny", "Big",
+                     "Fast", "Slow", "Hot", "Cold", "Fun", "Nice", "Wise", "Kind"]
+        nouns = ["Tiger", "Bear", "Wolf", "Eagle", "Phoenix", "Dragon", "Lion", "Shark",
+                "Fox", "Owl", "Hawk", "Falcon", "Stag", "Lynx", "Panda", "Koala",
+                "Dolphin", "Orca", "Raven", "Swan", "Cat", "Dog", "Bird", "Fish",
+                "Star", "Moon", "Sun", "Cloud", "Tree", "River", "Mountain", "Ocean"]
+        
+        max_attempts = 50
+        for _ in range(max_attempts):
+            adj = random.choice(adjectives)
+            noun = random.choice(nouns)
+            number = random.randint(1, 999)
+            username = f"{adj}{noun}#{number}"
+            
+            # Check uniqueness in room
+            if room_id not in self.room_usernames:
+                self.room_usernames[room_id] = set()
+            
+            if username not in self.room_usernames[room_id]:
+                self.room_usernames[room_id].add(username)
+                return username
+        
+        # Fallback if all attempts failed (unlikely)
+        return f"User#{random.randint(1000, 9999)}"
+    
+    def create_user(self, user_id: str, room_id: str, username: Optional[str] = None) -> str:
+        """Create or get user. Returns username."""
+        if user_id in self.users:
+            # User exists, update room if changed
+            old_room = self.users[user_id]["room_id"]
+            if old_room != room_id:
+                # Remove from old room
+                if old_room in self.room_usernames:
+                    old_username = self.users[user_id]["username"]
+                    self.room_usernames[old_room].discard(old_username)
+                    if not self.room_usernames[old_room]:
+                        del self.room_usernames[old_room]
+                
+                # Add to new room
+                if room_id not in self.room_usernames:
+                    self.room_usernames[room_id] = set()
+                self.room_usernames[room_id].add(self.users[user_id]["username"])
+            
+            self.users[user_id]["room_id"] = room_id
+            return self.users[user_id]["username"]
+        
+        # New user
+        if not username:
+            username = self.generate_random_username(room_id)
+        else:
+            # Validate and ensure uniqueness
+            username = username.strip()
+            if room_id in self.room_usernames and username in self.room_usernames[room_id]:
+                # Conflict, generate random
+                username = self.generate_random_username(room_id)
+            else:
+                if room_id not in self.room_usernames:
+                    self.room_usernames[room_id] = set()
+                self.room_usernames[room_id].add(username)
+        
+        self.users[user_id] = {
+            "username": username,
+            "room_id": room_id
+        }
+        return username
+    
+    def update_username(self, user_id: str, new_username: str) -> Optional[str]:
+        """Update username. Returns None if invalid, new username if success."""
+        if user_id not in self.users:
+            return None
+        
+        new_username = new_username.strip()
+        if not (1 <= len(new_username) <= 20):
+            return None
+        
+        room_id = self.users[user_id]["room_id"]
+        old_username = self.users[user_id]["username"]
+        
+        # Check uniqueness (allow if same username)
+        if new_username != old_username:
+            if room_id in self.room_usernames and new_username in self.room_usernames[room_id]:
+                return None  # Username taken
+        
+        # Update
+        if room_id in self.room_usernames:
+            self.room_usernames[room_id].discard(old_username)
+            self.room_usernames[room_id].add(new_username)
+        
+        self.users[user_id]["username"] = new_username
+        return new_username
+    
+    def get_user(self, user_id: str) -> Optional[Dict]:
+        """Get user info."""
+        return self.users.get(user_id)
+    
+    def remove_user(self, user_id: str):
+        """Remove user and cleanup."""
+        if user_id not in self.users:
+            return
+        
+        user = self.users[user_id]
+        room_id = user["room_id"]
+        username = user["username"]
+        
+        # Remove from room usernames
+        if room_id in self.room_usernames:
+            self.room_usernames[room_id].discard(username)
+            if not self.room_usernames[room_id]:
+                del self.room_usernames[room_id]
+        
+        del self.users[user_id]
+
+# Initialize UserManager
+user_manager = UserManager()
 
 # ===== YouTube Suggestion System =====
 
@@ -439,17 +568,30 @@ def get_queue(room_id: str):
 async def add_song(room_id: str, request: Request):
     data = await request.json()
     video_id = extract_video_id(data.get("url", ""))
+    user_id = data.get("user_id")  # Get user_id from request
 
     if not video_id:
         return JSONResponse({"error": "Invalid YouTube URL"}, status_code=400)
 
+    # Get username (generate if user doesn't exist)
+    username = "Unknown"
+    if user_id:
+        username = user_manager.create_user(user_id, room_id)
+    else:
+        # Fallback: generate temporary user
+        temp_user_id = str(uuid.uuid4())
+        username = user_manager.create_user(temp_user_id, room_id)
+
     title = get_youtube_title(video_id)
 
     room = rooms[room_id]
-    room["queue"].append({
+    song_entry = {
         "video_id": video_id,
-        "title": title
-    })
+        "title": title,
+        "added_by_user_id": user_id or temp_user_id,
+        "added_by_username": username
+    }
+    room["queue"].append(song_entry)
     
     # If no song is currently playing and queue was empty before, auto-play first song
     if room["current"] is None and len(room["queue"]) == 1:
@@ -498,6 +640,7 @@ async def finish_song(room_id: str):
 async def remove_song(room_id: str, request: Request):
     data = await request.json()
     index = data.get("index")
+    user_id = data.get("user_id")  # Get user_id from request
 
     room = rooms.get(room_id)
     if not room:
@@ -507,6 +650,11 @@ async def remove_song(room_id: str, request: Request):
 
     if index is None or index < 0 or index >= len(queue):
         return JSONResponse({"error": "Invalid index"}, status_code=400)
+
+    # Check if user has permission to remove this song
+    song_to_remove = queue[index]
+    if user_id and song_to_remove.get("added_by_user_id") != user_id:
+        return JSONResponse({"error": "Permission denied: You can only remove your own songs"}, status_code=403)
 
     # Xóa bài
     removed = queue.pop(index)
@@ -577,6 +725,13 @@ async def connect(sid, environ):
 @sio.event
 async def disconnect(sid):
     print(f"✗ Client disconnected: {sid}")
+    
+    # Cleanup user if exists
+    user_id = sid_to_user_id.get(sid)
+    if user_id:
+        user_manager.remove_user(user_id)
+        del sid_to_user_id[sid]
+    
     # Remove from all rooms
     for room_id in list(room_clients.keys()):
         if sid in room_clients[room_id]:
@@ -587,6 +742,9 @@ async def disconnect(sid):
 @sio.event
 async def join_room(sid, data):
     room_id = data.get("room_id")
+    user_id = data.get("user_id")  # Get user_id from client
+    username = data.get("username")  # Optional username from client
+    
     if not room_id:
         return
 
@@ -597,20 +755,87 @@ async def join_room(sid, data):
         return
 
     # ✅ Room hợp lệ
+    # Create or get user
+    if user_id:
+        final_username = user_manager.create_user(user_id, room_id, username)
+        sid_to_user_id[sid] = user_id
+    else:
+        # Generate temporary user_id if not provided
+        temp_user_id = str(uuid.uuid4())
+        final_username = user_manager.create_user(temp_user_id, room_id)
+        sid_to_user_id[sid] = temp_user_id
+        user_id = temp_user_id
+
     if room_id not in room_clients:
         room_clients[room_id] = set()
 
     room_clients[room_id].add(sid)
     await sio.enter_room(sid, room_id)
 
-    print(f"✓ User {sid} joined room {room_id}")
+    print(f"✓ User {sid} (user_id: {user_id}, username: {final_username}) joined room {room_id}")
 
     room = rooms[room_id]
 
     # Gửi trạng thái ban đầu
-    await sio.emit("room_joined", {"room_id": room_id}, to=sid)
+    await sio.emit("room_joined", {
+        "room_id": room_id,
+        "user_id": user_id,
+        "username": final_username
+    }, to=sid)
     await sio.emit("current_song", room.get("current"), to=sid)
     await sio.emit("queue_update", room.get("queue", [])[:5], to=sid)
+
+@sio.event
+async def update_username(sid, data):
+    """Update username for the user."""
+    user_id = sid_to_user_id.get(sid)
+    if not user_id:
+        await sio.emit("username_update_failed", {"error": "User not found"}, to=sid)
+        return
+    
+    new_username = data.get("username", "").strip()
+    if not (1 <= len(new_username) <= 20):
+        await sio.emit("username_update_failed", {"error": "Username must be 1-20 characters"}, to=sid)
+        return
+    
+    updated_username = user_manager.update_username(user_id, new_username)
+    if updated_username is None:
+        await sio.emit("username_update_failed", {"error": "Username already taken or invalid"}, to=sid)
+        return
+    
+    # Get user's room_id
+    user_info = user_manager.get_user(user_id)
+    if not user_info:
+        return
+    
+    room_id = user_info["room_id"]
+    
+    # Update queue entries for this user
+    room = rooms.get(room_id)
+    if room:
+        # Update all queue items added by this user
+        for song in room["queue"]:
+            if song.get("added_by_user_id") == user_id:
+                song["added_by_username"] = updated_username
+        
+        # Also update current song if it's by this user
+        if room.get("current") and room["current"].get("added_by_user_id") == user_id:
+            room["current"]["added_by_username"] = updated_username
+    
+    # Broadcast username update to all clients in room
+    await sio.emit("username_updated", {
+        "user_id": user_id,
+        "username": updated_username
+    }, room=room_id)
+    
+    # Also send confirmation to the user who updated
+    await sio.emit("username_update_success", {
+        "username": updated_username
+    }, to=sid)
+    
+    # Broadcast updated queue
+    if room:
+        await sio.emit("queue_update", room["queue"][:5], room=room_id)
 
 @sio.event
 async def leave_room(sid, data):
