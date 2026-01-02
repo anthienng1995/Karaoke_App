@@ -448,7 +448,11 @@ def tv_page():
 @app.post("/room/create")
 def create_room():
     room_id = uuid.uuid4().hex[:6].upper()
-    rooms[room_id] = {"queue": [], "current": None}
+    rooms[room_id] = {
+        "queue": [],
+        "current": None,
+        "volume": 50   # 🔊 volume mặc định
+    }
     return {"room_id": room_id}
 
 @app.get("/room/{room_id}")
@@ -784,6 +788,11 @@ async def join_room(sid, data):
     }, to=sid)
     await sio.emit("current_song", room.get("current"), to=sid)
     await sio.emit("queue_update", room.get("queue", [])[:5], to=sid)
+    await sio.emit(
+    "volume_update",
+    {"volume": room.get("volume", 50)},
+    to=sid
+)
 
 @sio.event
 async def update_username(sid, data):
@@ -845,6 +854,33 @@ async def leave_room(sid, data):
         if not room_clients[room_id]:
             del room_clients[room_id]
     await sio.leave_room(sid, room_id)
+
+@sio.event
+async def volume_change(sid, data):
+    room_id = data.get("room_id")
+    volume = data.get("volume")
+
+    if not room_id or room_id not in rooms:
+        return
+
+    try:
+        volume = int(volume)
+    except:
+        return
+
+    # Clamp 0–100
+    volume = max(0, min(100, volume))
+
+    # Lưu state
+    rooms[room_id]["volume"] = volume
+
+    # Broadcast cho toàn bộ room
+    await sio.emit(
+        "volume_update",
+        {"volume": volume},
+        room=room_id
+    )
+
 
 async def broadcast_to_room(room_id, event, data):
     """Broadcast event to all clients in a room"""
