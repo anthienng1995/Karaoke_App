@@ -470,37 +470,6 @@
   <button onclick="skipSong()" class="skip-btn">⏭ Skip bài</button>
 </div>
 
-<!-- ===== SHARE ROOM ===== -->
-<h3 class="section-title">👥 Mời bạn vào phòng</h3>
-
-<div id="share-box" style="
-  background: rgba(255,255,255,0.08);
-  border-radius: 12px;
-  padding: 16px;
-  text-align: center;
-  margin-bottom: 24px;
-">
-  <img id="share-qr" style="
-    width: 160px;
-    height: 160px;
-    margin-bottom: 12px;
-    border-radius: 8px;
-    background: white;
-    padding: 6px;
-  ">
-
-  <div id="share-link" style="
-    font-size: 11px;
-    opacity: 0.8;
-    word-break: break-all;
-    margin-bottom: 12px;
-  "></div>
-
-  <button onclick="shareRoom()" class="skip-btn">
-    📤 Chia sẻ phòng
-  </button>
-</div>
-
 <!-- ===== VOLUME CONTROL ===== -->
 <h3 class="section-title">🔊 Âm lượng</h3>
 
@@ -549,6 +518,37 @@
 <!-- ===== QUEUE ===== -->
 <h3 class="section-title">📋 Danh sách chờ</h3>
 <div id="queue"></div>
+
+<!-- ===== SHARE ROOM ===== -->
+<h3 class="section-title">👥 Mời bạn vào phòng</h3>
+
+<div id="share-box" style="
+  background: rgba(255,255,255,0.08);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+  margin-bottom: 24px;
+">
+  <img id="share-qr" style="
+    width: 160px;
+    height: 160px;
+    margin-bottom: 12px;
+    border-radius: 8px;
+    background: white;
+    padding: 6px;
+  ">
+
+  <div id="share-link" style="
+    font-size: 11px;
+    opacity: 0.8;
+    word-break: break-all;
+    margin-bottom: 12px;
+  "></div>
+
+  <button onclick="shareRoom()" class="skip-btn">
+    📤 Chia sẻ phòng
+  </button>
+</div>
 
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 
