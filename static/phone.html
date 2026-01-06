@@ -470,6 +470,31 @@
   <button onclick="skipSong()" class="skip-btn">⏭ Skip bài</button>
 </div>
 
+<!-- ===== VOLUME CONTROL ===== -->
+<h3 class="section-title">🔊 Âm lượng</h3>
+
+<div style="
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin-bottom:24px;
+">
+  <button onclick="changeVolume(-5)" class="skip-btn" style="width:64px;">➖</button>
+
+  <input
+    type="range"
+    min="0"
+    max="100"
+    value="50"
+    id="volume-slider"
+    oninput="setVolume(this.value)"
+    style="flex:1;"
+  >
+
+  <button onclick="changeVolume(5)" class="skip-btn" style="width:64px;">➕</button>
+</div>
+
+
 <!-- ===== SEARCH ===== -->
 <div class="search-container">
   <h3 class="section-title">🔍 Tìm bài hát</h3>
@@ -493,6 +518,37 @@
 <!-- ===== QUEUE ===== -->
 <h3 class="section-title">📋 Danh sách chờ</h3>
 <div id="queue"></div>
+
+<!-- ===== SHARE ROOM ===== -->
+<h3 class="section-title">👥 Mời bạn vào phòng</h3>
+
+<div id="share-box" style="
+  background: rgba(255,255,255,0.08);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+  margin-bottom: 24px;
+">
+  <img id="share-qr" style="
+    width: 160px;
+    height: 160px;
+    margin-bottom: 12px;
+    border-radius: 8px;
+    background: white;
+    padding: 6px;
+  ">
+
+  <div id="share-link" style="
+    font-size: 11px;
+    opacity: 0.8;
+    word-break: break-all;
+    margin-bottom: 12px;
+  "></div>
+
+  <button onclick="shareRoom()" class="skip-btn">
+    📤 Chia sẻ phòng
+  </button>
+</div>
 
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 
@@ -550,6 +606,9 @@ socket.on('room_joined', (data) => {
     localStorage.setItem('karaoke_username', currentUsername);
     updateUsernameDisplay();
   }
+
+  // ✅ Khởi tạo QR + link chia sẻ
+  initShareRoom();
 });
 
 socket.on('username_update_success', (data) => {
@@ -674,7 +733,14 @@ socket.on("room_invalid", () => {
   `;
 });
 
+socket.on("volume_update", (data) => {
+  if (typeof data.volume !== "number") return;
 
+  currentVolume = data.volume;
+
+  const slider = document.getElementById("volume-slider");
+  if (slider) slider.value = currentVolume;
+});
 
 /* ===== SKIP ===== */
 function skipSong() {
@@ -841,6 +907,61 @@ function removeSong(index) {
     console.error('Remove song error:', err);
     alert("Có lỗi xảy ra khi xóa bài!");
   });
+}
+
+/* ===== VOLUME CONTROL ===== */
+let currentVolume = 50;
+
+function setVolume(v) {
+  currentVolume = Number(v);
+
+  socket.emit("volume_change", {
+    room_id: room,
+    volume: currentVolume
+  });
+}
+
+function changeVolume(delta) {
+  currentVolume = Math.max(0, Math.min(100, currentVolume + delta));
+
+  document.getElementById("volume-slider").value = currentVolume;
+
+  socket.emit("volume_change", {
+    room_id: room,
+    volume: currentVolume
+  });
+}
+
+/* ===== SHARE ROOM (QR + LINK) ===== */
+function initShareRoom() {
+  if (!room) return;
+
+  const joinUrl = `${location.origin}/phone.html?room=${room}`;
+
+  const linkEl = document.getElementById("share-link");
+  const qrEl = document.getElementById("share-qr");
+
+  if (linkEl) linkEl.textContent = joinUrl;
+  if (qrEl) {
+    qrEl.src =
+      "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=" +
+      encodeURIComponent(joinUrl);
+  }
+}
+
+function shareRoom() {
+  const joinUrl = `${location.origin}/phone.html?room=${room}`;
+
+  if (navigator.share) {
+    navigator.share({
+      title: "Vào phòng karaoke 🎤",
+      text: "Bấm link hoặc quét QR để chọn bài cùng mình nhé!",
+      url: joinUrl
+    });
+  } else {
+    navigator.clipboard.writeText(joinUrl);
+    alert("✅ Đã copy link phòng");
+  }
 }
 
 /* ===== AUTOCOMPLETE SUGGESTIONS ===== */

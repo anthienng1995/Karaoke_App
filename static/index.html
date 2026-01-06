@@ -166,6 +166,7 @@
     let fetchingNext = false;
     let pendingSong = null; // Store song waiting for YouTube API to be ready
     let youtubeAPIReady = false;
+    let currentVolume = 50;   // 🔊 volume mặc định
 
     // ===== Polling control =====
     function stopAllPolling() {
@@ -243,6 +244,16 @@
         checkAndPlay();
       });
 
+      socket.on("volume_update", (data) => {
+        if (typeof data.volume !== "number") return;
+
+        currentVolume = data.volume;
+
+        if (player && player.setVolume) {
+          player.setVolume(currentVolume);
+        }
+      });
+
       socket.on('disconnect', () => {
         console.log('✗ TV Socket disconnected - starting fallback polling');
         startFallbackPolling();
@@ -283,6 +294,12 @@
         // Player already exists, just load and play
         console.log('Player exists, loading video:', song.video_id);
         player.loadVideoById(song.video_id);
+        // 🔊 Đảm bảo volume không bị reset
+        setTimeout(() => {
+          if (player && player.setVolume) {
+            player.setVolume(currentVolume);
+          }
+        }, 500);
         // Auto-play will be triggered by onStateChange when state becomes CUED
         // Also try to play immediately in case CUED doesn't fire
         setTimeout(() => {
@@ -334,6 +351,9 @@
             iframe.style.inset = "0";
             iframe.style.width = "100vw";
             iframe.style.height = "100vh";
+
+            // 🔊 SET VOLUME TỪ SERVER
+            e.target.setVolume(currentVolume);
 
             // Retry function to ensure video plays
             const tryPlay = (attempt = 0) => {
